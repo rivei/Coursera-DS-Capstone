@@ -1,0 +1,323 @@
+---
+title: "Text Prediction APP Development Milestone Report"
+subtitle: "for Coursera Data Science Capstone Project"
+author: "Wei Lin"
+date: "2019 Apr. 13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE, warning = FALSE, results = 'asis')
+library(stringi)
+library(dplyr)
+library(knitr)
+library(ggplot2)
+library(tidytext)
+library(tidyr)
+library(wordcloud)
+library(tm)
+library(gridExtra)
+```
+## Introduction
+Nowadays typing in smartphones is becoming almost everybody's daily essential: writing blogs, posting tweets or typing keywords to search for information. But typing word by word all day is tiring. It would be nice if the smartphone keyboard can pop up next word when typing. Many smartphone keyboard applications have developed this function, SwiftKey for example, can predict what next words the user is most likely to type.  
+
+
+The objective of this project is to develop a Shiny application which can give user the prediction when typing a few words, the APP should be able to present few options for what the next word might be. The project is for the capstone of the Data Science Specialization of Coursera, which is offered by John Hopkins, and SwiftKey is the corporate partner in this capstone.    
+
+
+So far, the [training data](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip") of the project is downloaded and partially explored. And these processes are documented in this milestone report to answer the following questions:  
+1. What do the data look like?  
+2. What are the distributions of word frequencies?  
+3. What are the frequencies of 2-grams and 3-grams in the data set?  
+4. How many unique words do you need in a frequency sorted dictionary to cover 50% of all word instances in the language? 90%?  
+5. How do you evaluate how many of the words come from foreign languages?  
+6. Can you think of a way to identify words that may not be in the corpora or using a smaller number of words in the dictionary to cover the same number of phrases?
+
+
+## Data Processing
+### General information of data
+Before getting started, it is necessary to have a brief understanding of the training data. The table below shows the size of each text file and their number of lines, maximum length of line, total word count and word counts per line.    
+```{r fileinfo}
+## download data
+file_url <- "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+file_name <- "Coursera-SwiftKey.zip" 
+if (!file.exists(file_name)){
+  download.file(file_url, destfile=file_name, method="curl")
+  unzip(zipfile=file_name, exdir=getwd())
+}
+## load data and get file information
+text_dir <- "final/en_US"
+text_names <- list.files(text_dir, "txt") 
+file_size <- round(file.info(dir(text_dir))[1]/1024^2, digits=2)
+colnames(file_size) <- "Size (MB)"
+start_time <- as.POSIXct(Sys.time())
+if (exists("a")){rm(a)} 
+for(i in c(1: length(text_names))){
+  con <- file(paste(text_dir,text_names[i], sep = "/"), "rb") #"rb" to make sure all the lines are read
+  assign(text_names[i], readLines(con, encoding = "UTF-8", skipNul = T))
+  close(con)
+  texts <- get(text_names[i])
+  df <- data.frame(text_name = text_names[i], 
+                   line_length = stri_count_boundaries(texts,type="character"),
+                   word_count = stri_count_words(texts),
+                   stringsAsFactors = F)
+  if (exists("a")) {
+    a <- bind_rows(a, df)
+  }else{
+    a <- bind_rows(df)
+  }
+}
+rm(texts, df)
+
+kable(cbind(file_size, info_df <- a %>% group_by(text_name) %>%
+        summarise("Num. of lines" = n(),
+                  "Max. line length" = max(line_length), 
+                  "Total word count" = sum(word_count),
+                  "Words per line" = round(mean(word_count),2)) %>% 
+        subset(select = -text_name )))
+```
+
+As the table shows, these files have enormous words and sentences, i.e. total `r formatC(sum(info_df$'Total word count'), format="d", big.mark=",")` words. It is not wise to use all of them for training. Before sampling, the distributions of each line's word count in each file are analyzed and presented in the histogram below.   
+```{r histall}
+# plot histogram 
+a %>% group_by(text_name) %>%
+  subset(word_count<quantile(a$word_count, 0.99)) %>%
+  ggplot(aes(x = word_count, fill=text_name)) +
+  geom_histogram(binwidth = 5, show.legend = FALSE)+
+  facet_grid(text_name~., scales = "free_y") +
+  ggtitle("Histogram of Word Counts of Each Line of All Data")+
+  xlab("Word count per line")+
+  ylab("Frequency")
+rm(a)
+```
+
+### Sampling
+The full entries of Oxford English Dictionary include about 171,476 words in current use. The total word counts of the training data is nearly 600 times of that. So as start, only 1% of the data will be used for exploratory analysis. And because the total word counts of each file are approximately equal, the three files are randomly extracted 1% to form the sample data set.   
+
+A summary of the sampled data set is shown in the below table:
+```{r sampling}
+set.seed(10086)
+sampling_rate = 0.01
+text_len <- info_df$`Num. of lines`
+samples <- rbind(data.frame(text_src = "blogs", 
+                            text = en_US.blogs.txt[rbinom(text_len[1]*sampling_rate,text_len[1], 0.5)]
+                            ,stringsAsFactors = F),
+                 data.frame(text_src = "news", 
+                            text = en_US.news.txt[rbinom(text_len[2]*sampling_rate,text_len[2], 0.5)]
+                            ,stringsAsFactors = F),
+                 data.frame(text_src = "twitter", 
+                            text = en_US.twitter.txt[rbinom(text_len[3]*sampling_rate,text_len[3], 0.5)]
+                            ,stringsAsFactors = F))
+a <- data.frame(text_name = samples$text_src, 
+                word_count = stri_count_words(samples$text)) 
+kable(a %>% group_by("Text Source" = text_name) %>%
+  summarise("Num. of lines" = n(),
+            "Total word count" = sum(word_count), 
+            "Words per line" = round(mean(word_count),2))
+)
+
+```
+
+And the distributions of each line's word count in each source are demonstrated in the following histogram  
+```{r histsample}
+a %>% group_by(text_name) %>%
+  subset(word_count<quantile(a$word_count, 0.99)) %>%
+  ggplot(aes(x = word_count, fill=text_name)) +
+  geom_histogram(binwidth = 5, show.legend = FALSE)+
+  facet_grid(text_name~., scales = "free_y") +
+  ggtitle("Histogram of Word Counts of Each Line of Samples")+
+  xlab("Word count per line")+
+  ylab("Frequency")
+rm(a, en_US.blogs.txt, en_US.news.txt, en_US.twitter.txt)
+```
+
+The plots of the samples have very similar shapes to the original data, which indicates the sample data set can properly represent the original data.  
+
+
+### Text processing
+Having the sample data set in hand, the first step is to do basic text processing, which is to remove useless elements like urls, email address, Unicode characters, punctuation and numbers. As for this project, profanity words are also removed, to avoid bad word prediction in the final APP. Profanity word list is based on [the bad word list from Google](https://www.freewebheaders.com/download/files/full-list-of-bad-words_csv-file_2018_07_30.zip)  
+
+Then the texts are tokenized: sentences are separated in to words, stop words are removed and the remaining words are ordered based on their frequencies. Below word cloud presents the top 100 most frequent words in the sample data set.   
+
+#### Top 100 frequent words
+```{r wordcloud}
+## tokenize samples and build N-gram models
+# Download profanity file from Google
+file_url <- "https://www.freewebheaders.com/download/files/full-list-of-bad-words_csv-file_2018_07_30.zip"
+file_name <- "full-list-of-bad-words_csv-file_2018_07_30" 
+if (!file.exists(paste(file_name,"zip", sep = "."))){
+  download.file(file_url, destfile=paste(file_name,"zip", sep = "."), method="curl")
+  unzip(zipfile=paste(file_name,"zip", sep = "."), exdir=getwd())
+}
+profanity <- read.csv(paste(file_name, "csv", sep = "."), header=F, sep=";", strip.white=T, stringsAsFactors = F)[1]
+characters <- c("\u00f1","\u00a9","\u3e64","\u00f8","\u24d5","\u24d0","\u24d2","\u24e3",
+                "\ufeff","\u1e5b","\u1e63","\u1e47","\u3e30","\u00e4","\u00e7")
+
+clean_sample <- 
+  mutate(samples, text = gsub("([--:\\w?@%&+~#=]*\\.[a-z]{2,4}\\/{0,2})((?:[?&](?:\\w+)=(?:\\w+))+|[--:\\w?@%&+~#=]+)?", 
+                     "",text, perl=T)) %>% #remove url and email address
+  mutate(text = gsub("RT : | via|\\(via \\)" ,"",text, perl = T))%>% #remove retweet
+  mutate(text = gsub(sprintf("(*UCP)(%s)", paste(characters, collapse = "|")), 
+                     "", text, perl = TRUE)) %>% #remove unicode characters
+  mutate(text = gsub("[[:digit:]]","",text)) %>% #remove numbers
+  mutate(text = gsub("(['])|[[:punct:]]", "\\1", text)) #remove punctuation
+
+# single word frequency 
+unigram<- clean_sample %>% 
+  unnest_tokens(word, text) %>%
+  filter(!word %in% stop_words$word) %>% 
+  count(word, sort = T) %>% 
+  mutate(cum = cumsum(n/sum(n)))
+# generate word cloud
+with(unigram,wordcloud(word, n, max.words = 100, col = rainbow(n),random.color = T,random.order = F))
+
+```
+
+By accumulating the frequencies, it can be found how many words it needs to represent most of the sample contexts.    
+```{r covering}
+kable(unigram%>%
+  mutate(gp = ifelse(cum < 0.9, ifelse(cum<0.5, 50, 90),100))%>%
+  group_by(gp)%>%
+  summarise(n = cumsum(n())) %>%
+  mutate("Number of Words" = cumsum(n), "Cover % of sample texts" = gp) %>%
+  select(-n, -gp))
+
+```
+
+The table above shows that only less than half of the sample vocabulary cover 90% of all word instances in the sample texts. However some words are actually duplicated because of verb conjugation, or plural forms.
+
+
+### Stemming Texts  
+By introducing the texts, even less word entries are needed to represent the texts. The word cloud of word stems is generated, the key words are basically the same as the previous one.
+
+#### Top 100 frequent word stems  
+```{r stemming}
+corp <- Corpus(VectorSource(clean_sample$text))
+corp = tm_map(corp, stemDocument)
+tm_samples <- mutate(clean_sample, text = corp$content) %>%
+  unnest_tokens(word, text) %>%
+  filter(!word %in% stop_words$word) %>% 
+  count(word, sort = T) %>% 
+  mutate(cum = cumsum(n/sum(n)))
+
+with(tm_samples,wordcloud(word, n, max.words = 100, col = rainbow(n),random.color = T,random.order = F))
+```
+
+And the following table updates the sample vocabulary size:  
+```{r stemcloud}
+kable(tm_samples%>%
+        mutate(gp = ifelse(cum < 0.9, ifelse(cum<0.5, 50, 90),100))%>%
+        group_by(gp)%>%
+        summarise(n = cumsum(n())) %>% 
+        mutate("Number of Word Stems" = cumsum(n), "Cover % of sample texts" = gp) %>%
+        select(-n, -gp))
+```
+
+The size is close to the Oxford English Dictionary entries. But it not yet includes all the words in English and still contains some foreign words. Nonetheless, those words have very low frequency, as the model will be built based on word frequencies, their influence can be ignored. To enlarge the vocabulary of the model the size of training data should be increased.  
+
+
+## Basic N-gram Models  
+With the cleaning data from above, 1 to 4 N-gram models are built by using tidytext library in R. Considering that the word prediction should be natural, stop words are not removed from 2 to 4 N-gram models. The 20 most frequent N-gram of each model and their corresponding frequencies are plotted in the graph below.  
+```{r ngram}
+p1 <- unigram %>%
+  head(20)%>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill = n)) +
+  geom_col() +
+  scale_fill_gradient2(high = "firebrick1") +
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())+
+  xlab(NULL) +
+  ylab(NULL) +
+  labs(fill = "Frequency", title = "Top 20 frequent Unigram") +
+  coord_flip()
+
+# 2-gram
+bigrams <- clean_sample %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2) %>%
+  count(bigram, sort = T)
+
+p2 <- bigrams %>%
+  head(20)%>%
+  mutate(bigram = reorder(bigram, n)) %>%
+  ggplot(aes(bigram, n, fill = n)) +
+  geom_col() +
+  scale_fill_gradient2(high = "limegreen")+
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())+
+  xlab(NULL) +
+  ylab(NULL) +
+  labs(fill = "Frequency", title = "Top 20 frequent 2-gram") +
+  coord_flip()
+
+## build trigrams
+trigrams <- clean_sample %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3) %>%
+  count(trigram, sort = T)
+p3 <- trigrams %>%
+  head(20)%>%
+  mutate(trigram = reorder(trigram, n)) %>%
+  ggplot(aes(trigram, n, fill = n)) +
+  geom_col() +
+  scale_fill_gradient2(high = "dodgerblue")+
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())+
+  xlab(NULL) +
+  ylab(NULL) +
+  labs(fill = "Frequency", title = "Top 20 frequent 3-gram") +
+  coord_flip()
+
+## build quad-grams
+quadgrams <- clean_sample %>%
+  unnest_tokens(quadgram, text, token = "ngrams", n = 4) %>%
+  count(quadgram, sort = T)
+p4 <- quadgrams %>%
+  head(20)%>%
+  mutate(quadgram = reorder(quadgram, n)) %>%
+  ggplot(aes(quadgram, n, fill = n)) +
+  geom_col()+ 
+  scale_fill_gradient2(high = "darkorchid")+
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())+
+  xlab(NULL) +
+  ylab(NULL) +
+  labs(fill = "Frequency", title = "Top 20 frequent 4-gram") +
+  coord_flip()
+
+grid.arrange(p1, p2, p3, p4, nrow = 2)
+
+```
+
+
+## Conclusion and Next Steps  
+Having the current model, if I filter the top 3 entries beginning with "thanks for the" in 4-gram, the model returns the following result:  
+```{r testmodel}
+bigrams_sep <- bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+trigrams_sep <- trigrams %>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+  unite(word12, "word1", "word2", sep = " ")
+
+quadgrams_sep <- quadgrams %>%
+  separate(quadgram, c("word1", "word2","word3","word4"), sep = " ") %>%
+  unite(word123, "word1", "word2","word3", sep = " ")
+
+kable(head(quadgrams_sep %>% subset(word123 == "thanks for the"),3))
+```
+
+So for the word prediction application, it would be enough to list the 4th words of the top 3 result. Yet it would be possible that the first 3 words' combination cannot be found in the model, in that case, check for the N-1 gram might help to find the prediction, unless the word were not exist in any of the N-gram models. In that case, the vocabulary of N-gram models should be enlarge.   
+
+Thus, the next step are to find an appropriate way to make good used of the training data to improve the N-gram model; afterwards, a good UI should be designed and the model will be turned into an interactive Shiny application. 
+
+> Source code of this project can be found [here](https://github.com/rivei/Coursera-DS-Capstone).
+
+## References
+* [Using tidytext to make sentiment analysis easy](https://www.r-bloggers.com/using-tidytext-to-make-sentiment-analysis-easy/) (November 15, 2016 By Jacob Simmering)  
+* [How many words are there in the English language?](https://en.oxforddictionaries.com/explore/how-many-words-are-there-in-the-english-language)  
+* [Google blacklisted Words, Bad Words List, List of Swear Words](https://www.freewebheaders.com/full-list-of-bad-words-banned-by-google/) (January 15, 2019 By James Parker)
+* [R color cheatsheet](https://www.nceas.ucsb.edu/~frazier/RSpatialGuides/colorPaletteCheatsheet.pdf)  
+* [Different breaks per facet in ggplot2 histogram
+](https://stackoverflow.com/questions/17271968/different-breaks-per-facet-in-ggplot2-histogram)  
+* [regexr.com community patterns](https://regexr.com/)  
+* [Remove all punctuation except apostrophes in R](https://stackoverflow.com/questions/8697079/remove-all-punctuation-except-apostrophes-in-r)  
